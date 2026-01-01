@@ -1,0 +1,235 @@
+--[[
+██╗    ██╗██╗  ██╗ ██████╗ ██████╗ ██████╗ ██╗     ███████╗
+██║    ██║██║  ██║██╔═══██╗██╔══██╗██╔══██╗██║     ██╔════╝
+██║ █╗ ██║███████║██║   ██║██████╔╝██████╔╝██║     ███████╗
+██║███╗██║██╔══██║██║   ██║██╔═══╝ ██╔═══╝ ██║     ╚════██║
+╚███╔███╔╝██║  ██║╚██████╔╝██║     ██║     ███████╗███████║
+ ╚══╝╚══╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝     ╚══════╝╚══════╝
+
+Lua-side duplication of the API of events on Roblox objects.
+Signals are needed to ensure that for local events, objects are passed by
+reference rather than by value where possible, as BindableEvent objects
+always pass signal arguments by value, causing tables to be deep copied.
+Roblox's deep copy method parses to a non-Lua table compatible format.
+
+Color Scheme: Purple + Black (#800080 + #000000)
+@classmod Signal
+]]
+
+local HttpService = game:GetService("HttpService")
+
+-- Color configuration
+local COLOR = {
+    PURPLE = "\27[35m",    -- Фиолетовый текст
+    BLACK = "\27[30m",     -- Черный текст
+    BG_PURPLE = "\27[45m", -- Фиолетовый фон
+    BG_BLACK = "\27[40m",  -- Черный фон
+    RESET = "\27[0m",      -- Сброс цвета
+    BOLD = "\27[1m",       -- Жирный текст
+    UNDERLINE = "\27[4m"   -- Подчеркнутый текст
+}
+
+local ENABLE_TRACEBACK = false
+local ENABLE_COLORED_LOGS = true
+
+-- Helper function for colored output
+local function colorize(text, color, bgColor)
+    if not ENABLE_COLORED_LOGS then
+        return text
+    end
+    return COLOR[bgColor or "BG_BLACK"] .. COLOR[color or "PURPLE"] .. text .. COLOR.RESET
+end
+
+-- Signal class table
+local Signal = {}
+Signal.__index = Signal
+Signal.ClassName = colorize("Signal", "PURPLE", "BG_BLACK")
+Signal.Version = "2.1.0"
+
+--- Constructs a new signal with purple-black theme
+-- @constructor Signal.new()
+-- @treturn Signal
+function Signal.new()
+    local self = setmetatable({}, Signal)
+
+    self._bindableEvent = Instance.new("BindableEvent")
+    self._argMap = {}
+    self._source = ENABLE_TRACEBACK and debug.traceback() or ""
+    self._connections = 0
+    self._created = os.time()
+    
+    -- Decorate instance name with color
+    self._bindableEvent.Name = colorize("SignalBindableEvent", "PURPLE", "BG_BLACK")
+    
+    -- Event cleanup connection
+    self._cleanupConnection = self._bindableEvent.Event:Connect(function(key)
+        if self._argMap[key] then
+            self._argMap[key] = nil
+            -- Optional: Log cleanup (commented by default)
+            -- print(colorize("[Signal] Cleaned up argument map for key: " .. key, "PURPLE"))
+        end
+
+        -- Clean up argmap if signal is destroyed and no args left
+        if (not self._bindableEvent) and (not next(self._argMap)) then
+            self._argMap = nil
+        end
+    end)
+    
+    -- Debug log (optional)
+    if ENABLE_TRACEBACK then
+        print(colorize(COLOR.BOLD .. "=== Signal Created ===", "PURPLE"))
+        print(colorize("Time: " .. os.date("%H:%M:%S", self._created), "PURPLE"))
+        print(colorize("Source: " .. self._source, "PURPLE"))
+        print(colorize("=========================", "PURPLE"))
+    end
+
+    return self
+end
+
+--- Fire the event with the given arguments
+-- @param ... Variable arguments to pass to handler
+-- @treturn nil
+function Signal:Fire(...)
+    if not self._bindableEvent then
+        local warning = colorize(COLOR.BOLD .. "⚠ WARNING: Signal is already destroyed! ⚠", "PURPLE")
+        local source = colorize("Source: " .. self._source, "BLACK", "BG_PURPLE")
+        warn(warning .. "\n" .. source)
+        return
+    end
+
+    local args = table.pack(...)
+    
+    -- Generate unique key with GUID
+    local key = HttpService:GenerateGUID(false)
+    self._argMap[key] = args
+    
+    -- Fire the event
+    self._bindableEvent:Fire(key)
+    
+    -- Debug log (optional)
+    if ENABLE_TRACEBACK then
+        local argCount = args.n
+        local argPreview = ""
+        if argCount > 0 then
+            local preview = {}
+            for i = 1, math.min(argCount, 3) do
+                table.insert(preview, tostring(args[i]))
+            end
+            argPreview = table.concat(preview, ", ")
+            if argCount > 3 then
+                argPreview = argPreview .. ", ..."
+            end
+        end
+        print(colorize(string.format("[Fire] Key: %s | Args: %d [%s]", 
+            key:sub(1, 8) .. "...", argCount, argPreview), "PURPLE"))
+    end
+end
+
+--- Connect a new handler to the event
+-- @tparam function handler Function handler
+-- @treturn Connection Connection object
+function Signal:Connect(handler)
+    if not (type(handler) == "function") then
+        local errorMsg = colorize(string.format("CONNECTION ERROR: Expected function, got %s", 
+            typeof(handler)), "PURPLE", "BG_BLACK")
+        error(errorMsg, 2)
+    end
+
+    self._connections = self._connections + 1
+    
+    -- Debug log (optional)
+    if ENABLE_TRACEBACK then
+        print(colorize(string.format("[Connect] Total connections: %d", self._connections), "PURPLE"))
+    end
+
+    return self._bindableEvent.Event:Connect(function(key)
+        local args = self._argMap[key]
+        if args then
+            -- Execute handler with arguments
+            handler(table.unpack(args, 1, args.n))
+        else
+            local errorMsg = colorize("ARGUMENT ERROR: Missing arg data (likely due to reentrance)", 
+                "PURPLE", "BG_BLACK")
+            error(errorMsg)
+        end
+    end)
+end
+
+--- Wait for fire to be called and return arguments
+-- @treturn ... Variable arguments from connection
+function Signal:Wait()
+    local key = self._bindableEvent.Event:Wait()
+    local args = self._argMap[key]
+    
+    if args then
+        return table.unpack(args, 1, args.n)
+    else
+        local errorMsg = colorize("WAIT ERROR: Missing arg data (likely due to reentrance)", 
+            "PURPLE", "BG_BLACK")
+        error(errorMsg)
+        return nil
+    end
+end
+
+--- Get signal statistics
+-- @treturn table Statistics about the signal
+function Signal:GetStats()
+    return {
+        connections = self._connections,
+        argsInFlight = self._argMap and table.count(self._argMap) or 0,
+        created = self._created,
+        isDestroyed = not self._bindableEvent,
+        source = self._source
+    }
+end
+
+--- Pretty print signal information
+-- @treturn nil
+function Signal:PrintInfo()
+    local stats = self:GetStats()
+    local border = colorize(COLOR.BOLD .. "═" .. string.rep("═", 40), "PURPLE")
+    
+    print(colorize(COLOR.BOLD .. "╔" .. string.rep("═", 40) .. "╗", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "║" .. string.format("%-40s", " SIGNAL INFORMATION ") .. "║", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "╠" .. string.rep("═", 40) .. "╣", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "║ " .. string.format("%-39s", "Connections: " .. stats.connections) .. "║", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "║ " .. string.format("%-39s", "Args in flight: " .. stats.argsInFlight) .. "║", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "║ " .. string.format("%-39s", "Is destroyed: " .. tostring(stats.isDestroyed)) .. "║", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "║ " .. string.format("%-39s", "Created: " .. os.date("%H:%M:%S", stats.created)) .. "║", "PURPLE"))
+    print(colorize(COLOR.BOLD .. "╚" .. string.rep("═", 40) .. "╝", "PURPLE"))
+end
+
+--- Disconnect all events and destroy the signal
+-- @treturn nil
+function Signal:Destroy()
+    if self._bindableEvent then
+        -- Clean up connections
+        if self._cleanupConnection then
+            self._cleanupConnection:Disconnect()
+            self._cleanupConnection = nil
+        end
+        
+        -- Destroy bindable event
+        self._bindableEvent:Destroy()
+        self._bindableEvent = nil
+        
+        -- Debug log
+        print(colorize(COLOR.BOLD .. "[Signal] Successfully destroyed", "PURPLE"))
+    end
+    
+    -- Clean up metatable
+    setmetatable(self, nil)
+end
+
+-- Add some utility functions to the class
+Signal.__tostring = function(self)
+    local stats = self:GetStats()
+    return colorize(string.format("Signal[Connections: %d, Active: %s]", 
+        stats.connections, tostring(not stats.isDestroyed)), "PURPLE")
+end
+
+-- Export color utilities for external use
+Signal.Colors = COLOR
+Signal.Colorize = colorize
+
+return Signal
